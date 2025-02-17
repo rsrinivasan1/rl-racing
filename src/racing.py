@@ -2,7 +2,10 @@ import gymnasium as gym
 import time
 import numpy as np
 import torch
+import cv2
+import matplotlib.pyplot as plt
 import torch.nn as nn
+from tqdm import tqdm
 from memory import PPOMemory
 from network import Actor, Critic, SharedCNN
 from config import batch_size, learning_rate, n_epochs, gamma, gae_lambda, c_1, eps, N, n_games, layer_dims_actor, layer_dims_critic, n_envs
@@ -37,10 +40,21 @@ def choose_actions(states, actor, critic, action_map):
 
 
 def preprocess_states(states):
+    # crop out the bottom 12 pixels
+    states = states[:, :-12, :, :]
+    # resize to 96x96
+    states = np.array([cv2.resize(state, (96, 96)) for state in states])
     # convert to grayscale
-    states = np.transpose(states, (0, 3, 1, 2))
-    return (states * np.array([0.299, 0.587, 0.114]).reshape(1, 3, 1, 1)).sum(axis=1, keepdims=True).astype(np.float32)
-    
+    states = np.expand_dims(np.dot(states[..., :3], [0.2989, 0.5870, 0.1140]), axis=0)
+    # plt.imshow(states[0][0], cmap="gray")
+    # plt.show()
+
+    # turn gray track to black, everything else to white
+    states[states < 150] = 0
+    states[states >= 150] = 255
+    # plt.imshow(states[0][0], cmap="gray")
+    # plt.show()
+    return states
 
 def step(actor_optim, critic_optim, loss):
     actor_optim.zero_grad()
@@ -125,7 +139,11 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
         while not done:
             states = preprocess_states(states)
             actions, mapped_actions, probs, vals = choose_actions(states, actor, critic, action_map)
-            next_states, rewards, dones, _, _ = envs.step(mapped_actions)
+            for _ in range(20):
+                # repeat action 20 times
+                next_states, rewards, dones, _, _ = envs.step(mapped_actions)
+                if any(dones):
+                    break
             num_steps += 1
             scores += rewards
             # store this observation
@@ -156,7 +174,7 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
 
 def make_env(gym_id):
     def thunk():
-        return gym.make(gym_id)
+        return gym.make(gym_id, render_mode="human")
     return thunk
 
 
