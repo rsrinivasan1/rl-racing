@@ -13,7 +13,7 @@ class SharedCNN(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv_layers = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=4, stride=2),  # 96x96x4 -> 47x47x8
+            nn.Conv2d(4, 8, kernel_size=4, stride=2),  # 96x96x4 -> 47x47x8
             nn.ReLU(),
             nn.Conv2d(8, 16, kernel_size=3, stride=2),  # 47x47x8 -> 23x23x16
             nn.ReLU(),
