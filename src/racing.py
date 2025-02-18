@@ -8,7 +8,7 @@ import torch.nn as nn
 from tqdm import tqdm
 from memory import PPOMemory
 from network import Actor, Critic, SharedCNN
-from config import batch_size, learning_rate, n_epochs, gamma, gae_lambda, c_1, eps, N, n_games, layer_dims_actor, layer_dims_critic, n_envs
+from config import batch_size, learning_rate, n_epochs, gamma, gae_lambda, c_1, eps, N, n_games, n_envs
 
 
 def calculate_actor_loss(old_log_probs, log_probs, adv_batch):
@@ -170,12 +170,14 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
         lr = learning_rate
         while not done:
             states = preprocess_states(states, frame_history)
-
             actions, mapped_actions, probs, vals = choose_actions(states, actor, critic, action_map)
+
+            active_envs = np.ones(n_envs, dtype=bool)  # All environments start as active
             for _ in range(20):
                 # repeat action 20 times
-                next_states, rewards, dones, _, _ = envs.step(mapped_actions)
-                if any(dones):
+                next_states, rewards, terminated, truncated, _ = envs.step(mapped_actions)
+                dones = terminated | truncated
+                if (done := all(dones)):
                     break
             num_steps += 1
             scores += rewards
@@ -190,17 +192,16 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
                 # actually backpropagate
                 learn(actor, critic, actor_optim, critic_optim, memory, lr)
             states = next_states
-            done = any(dones)
         
         # average score over all envs
         score = np.mean(scores)
         prev_scores.append(score)
         mean_score = np.mean(prev_scores[-100:])
 
-        print(f"Episode {i}, lr: {round(lr, 5)}, score: {score}, mean score: {mean_score}")
+        print(f"Episode {i}, lr: {round(lr, 5)}, score: {score}, mean score: {mean_score}\n")
         if mean_score > best_score:
             best_score = mean_score
-            print(f"Best average score over 100 trials: {best_score}")
+            print(f"Best average score over 100 trials: {best_score}\n")
 
     envs.close()
 
