@@ -170,14 +170,16 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
         lr = learning_rate
         while not done:
             states = preprocess_states(states, frame_history)
+            frame_history = states
             actions, mapped_actions, probs, vals = choose_actions(states, actor, critic, action_map)
 
             active_envs = np.ones(n_envs, dtype=bool)  # All environments start as active
-            for _ in range(20):
-                # repeat action 20 times
+            for _ in range(10):
+                # repeat action
                 next_states, rewards, terminated, truncated, _ = envs.step(mapped_actions)
                 dones = terminated | truncated
                 if (done := all(dones)):
+                    frame_history = None
                     break
             num_steps += 1
             scores += rewards
@@ -187,8 +189,9 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
             if num_steps % N == 0:
                 # anneal learning rate if specified
                 if anneal_lr:
+                    min_lr = 0.00001
                     frac = 1 - (i / n_games)
-                    lr = learning_rate * frac
+                    lr = max(min_lr, learning_rate * frac)
                 # actually backpropagate
                 learn(actor, critic, actor_optim, critic_optim, memory, lr)
             states = next_states
@@ -198,7 +201,7 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
         prev_scores.append(score)
         mean_score = np.mean(prev_scores[-100:])
 
-        print(f"Episode {i}, lr: {round(lr, 5)}, score: {score}, mean score: {mean_score}\n")
+        print(f"\nEpisode {i}, lr: {round(lr, 5)}, score: {score}, mean score: {mean_score}")
         if mean_score > best_score:
             best_score = mean_score
             print(f"Best average score over 100 trials: {best_score}\n")
