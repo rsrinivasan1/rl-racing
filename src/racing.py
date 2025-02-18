@@ -81,23 +81,27 @@ def preprocess_states(states, frame_history):
         # remove second dimension from states
         frame_history[:, -1] = states.squeeze(axis=1)
 
+    # # Display all four frames
+    # fig, axs = plt.subplots(1, 4, figsize=(12, 3))
+    # for i in range(4):
+    #     axs[i].imshow(frame_history[0, i], cmap='gray')
+    #     axs[i].axis('off')
+    # plt.show()
+
     # Stacked frames are already in the correct shape: [n_envs, 4, height, width]
     return frame_history
 
 
-def step(actor_optim, critic_optim, loss):
-    actor_optim.zero_grad()
-    critic_optim.zero_grad()
+def step(optim, loss):
+    optim.zero_grad()
     loss.backward()
-    actor_optim.step()
-    critic_optim.step()
+    optim.step()
 
 
 # assumes you have N observations in memory, for each batch makes a step
-def learn(actor, critic, actor_optim, critic_optim, memory, lr):
+def learn(actor, critic, optim, memory, lr):
     # update lr for both optimizers:
-    actor_optim.param_groups[0]['lr'] = lr
-    critic_optim.param_groups[0]['lr'] = lr
+    optim.param_groups[0]['lr'] = lr
     
     for i in range(n_epochs):
         # create batches from stored memory, shuffled each epoch
@@ -141,22 +145,22 @@ def learn(actor, critic, actor_optim, critic_optim, memory, lr):
 
                 total_loss = actor_loss + c_1 * critic_loss
 
-                step(actor_optim, critic_optim, total_loss)
+                step(optim, total_loss)
 
     memory.clear_memory()
 
 
-def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_lr=True):
+def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
     best_score = -float('inf')
     prev_scores = []
     num_steps = 0
 
     action_map = {
-        0: [-1, 0, 0],
-        1: [1, 0, 0],
-        2: [0, 1, 0.8],
-        3: [0, 0, 0.8],
-        4: [0, 0, 0]
+        0: [-1, 0, 0],  # turn left
+        1: [1, 0, 0],  # turn right
+        2: [0, 1, 0],  # accelerate
+        3: [0, 0, 0.8],  # brake
+        4: [0, 0, 0]  # do nothing
     }
 
     # initialize frame history for each env
@@ -173,18 +177,30 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
             frame_history = states
             actions, mapped_actions, probs, vals = choose_actions(states, actor, critic, action_map)
 
-            active_envs = np.ones(n_envs, dtype=bool)  # All environments start as active
-            for _ in range(10):
+            total_rewards = np.zeros(n_envs)
+            dones_received = np.zeros(n_envs, dtype=bool)
+
+            repeat_num = 10
+            for _ in range(repeat_num):
                 # repeat action
                 next_states, rewards, terminated, truncated, _ = envs.step(mapped_actions)
                 dones = terminated | truncated
+
+                mask = ~dones_received
+                total_rewards[mask] += rewards[mask]
+
+                # Track newly terminated environments
+                dones_received = dones_received | dones
+
+                reset_done_frames(frame_history, next_states, dones_received)
                 if (done := all(dones)):
-                    frame_history = None
                     break
+            
+            print(f"Action: {actions[0]}, Reward: {total_rewards[0]}")
             num_steps += 1
-            scores += rewards
+            scores += total_rewards / repeat_num
             # store this observation
-            memory.store_memory(states, actions, probs, vals, rewards, dones)
+            memory.store_memory(states, actions, probs, vals, total_rewards, dones_received)
 
             if num_steps % N == 0:
                 # anneal learning rate if specified
@@ -193,7 +209,7 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
                     frac = 1 - (i / n_games)
                     lr = max(min_lr, learning_rate * frac)
                 # actually backpropagate
-                learn(actor, critic, actor_optim, critic_optim, memory, lr)
+                learn(actor, critic, optim, memory, lr)
             states = next_states
         
         # average score over all envs
@@ -209,9 +225,32 @@ def run(envs, actor, critic, actor_optim, critic_optim, memory, device, anneal_l
     envs.close()
 
 
+def preprocess_state_single_env(state):
+    # Crop out the bottom 12 pixels
+    state = state[:-12, :, :]
+    # Resize to 96x96
+    state = cv2.resize(state, (96, 96))
+    # Convert to grayscale
+    state = np.dot(state[..., :3], [0.2989, 0.5870, 0.1140])
+    # Turn gray track to black, everything else to white
+    state[state < 150] = 0
+    state[state >= 150] = 255
+    # Add frame_width dimension at axis=0
+    state = np.expand_dims(state, axis=0)  # Shape: [1, height, width]
+    # Repeat the frame 4 times to create the stacked frame
+    state = np.repeat(state, 4, axis=0)  # Shape: [4, height, width]
+    return state
+
+
+def reset_done_frames(frame_history, next_states, dones):
+    for i, done in enumerate(dones):
+        if done:
+            frame_history[i] = preprocess_state_single_env(next_states[i])
+
+
 def make_env(gym_id):
     def thunk():
-        return gym.make(gym_id)
+        return gym.make(gym_id, render_mode="human")
     return thunk
 
 
@@ -220,22 +259,16 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # outdim is 5 for the following:
-    # 1. turn left
-    # 2. turn right
-    # 3. accelerate
-    # 4. brake
-    # 5. do nothing
-
     shared_cnn = SharedCNN().to(device)
     actor = Actor(shared_cnn, device)
     critic = Critic(shared_cnn, device)
 
-    actor_optim = torch.optim.Adam(actor.parameters(), lr=learning_rate, eps=1e-5)
-    critic_optim = torch.optim.Adam(critic.parameters(), lr=learning_rate, eps=1e-5)
+    optim = optimizer = torch.optim.Adam(
+        set(actor.parameters()) | set(critic.parameters()), lr=learning_rate, eps=1e-5
+    )
 
     memory = PPOMemory(batch_size, n_envs)
 
     start = time.time()
-    run(envs, actor, critic, actor_optim, critic_optim, memory, device)
+    run(envs, actor, critic, optim, memory, device)
     print(f"Training took {(time.time() - start)} seconds")
