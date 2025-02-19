@@ -105,28 +105,27 @@ def learn(actor, critic, optim, memory, lr):
     optim.param_groups[0]['lr'] = lr
     
     for i in range(n_epochs):
-        # create batches from stored memory, shuffled each epoch
         states_arr, actions_arr, old_probs_arr, values_arr, rewards_arr, dones_arr, batches = memory.generate_batches(n_states=N)
-        for j in range(n_envs):
-            # calculate advantage for each env, for every state in memory
-            advantage = np.zeros_like(rewards_arr[j])
-            # get each A_t BEFORE using shuffled batches, so that continuity of states is not broken
-            for t in range(len(rewards_arr[j]) - 1):
-                discount = 1
-                a_t = 0
-                for k in range(t, len(rewards_arr[j]) - 1):
-                    # discount = (gamma * gae_lambda) ^ (k - t)
-                    # A_t = sum of discount * (r_t + gamma * V(s_t+1) * (1 - done_t))
-                    # no more extra rewards if done, just discount * rewards_arr[k] - values[k]
-                    a_t += discount * (rewards_arr[j][k] + gamma * values_arr[j][k + 1] * (1 - int(dones_arr[j][k])) - values_arr[j][k])
-                    discount *= gamma * gae_lambda
-                    if dones_arr[j][k]:
-                        # reset discount to 1 if episode ends
-                        discount = 1
-                advantage[t] = a_t
+        # add 0 to each env in numpy array value_arr for last state
+        values_arr = np.concatenate([values_arr, np.zeros((n_envs, 1))], axis=1)
 
-            advantage = torch.tensor(advantage).to(device)
-            values = torch.tensor(values_arr[j]).to(device)
+        for j in range(n_envs):
+            # Efficient GAE calculation
+            traj_length = len(rewards_arr[j])
+            advantages = np.zeros(traj_length)
+            next_advantage = 0
+            
+            # Ensure values_arr[j] has one more element than rewards_arr[j]
+            # Compute deltas
+            deltas = rewards_arr[j] + gamma * values_arr[j][1:traj_length+1] * (1 - dones_arr[j]) - values_arr[j][:traj_length]
+            
+            # Backward pass to compute advantages
+            for t in reversed(range(traj_length)):
+                advantages[t] = deltas[t] + gamma * gae_lambda * (1 - dones_arr[j][t]) * next_advantage
+                next_advantage = advantages[t]
+            
+            advantage = torch.tensor(advantages).to(device)
+            values = torch.tensor(values_arr[j][:traj_length]).to(device)
 
             for batch in batches:
                 states = torch.tensor(states_arr[j][batch], dtype=torch.float).to(device)
@@ -174,7 +173,9 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
         scores = np.zeros(n_envs)
         lr = learning_rate
 
-        history_len =20
+        repeat_num = 4
+        history_len = 100 // 4
+        early_stopping_penalty = 30
         reward_history = [deque(maxlen=history_len) for _ in range(n_envs)]
         while not done:
             states = preprocess_states(states, frame_history)
@@ -184,7 +185,7 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
             total_rewards = np.zeros(n_envs)
             dones_received = np.zeros(n_envs, dtype=bool)
 
-            repeat_num = 4
+            
             for _ in range(repeat_num):
                 mask = ~dones_received
                 # repeat action
@@ -198,18 +199,16 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
                     break
             
             # print(f"Action: {actions[0]}, Reward: {total_rewards[0]}")
-
-            for j in range(n_envs):
-                reward_history[j].append(total_rewards[j])
             
             # # if any of the envs aren't getting rewards, stop all
-            # early_stop = False
-            # for i, env in enumerate(reward_history):
-            #     if len(env) == history_len and np.mean(env) < -0.09:
-            #         early_stop = True
-            #         # penalize the agent for not getting rewards
-            #         total_rewards[i] -= 10
-            #         break
+            early_stop = False
+            for j, env in enumerate(reward_history):
+                reward_history[j].append(total_rewards[j])
+                if len(env) == history_len and np.mean(env) < -0.09 * repeat_num:
+                    early_stop = True
+                    # penalize the agent for not getting rewards
+                    total_rewards[j] -= early_stopping_penalty
+                    break
             
             num_steps += 1
             scores += total_rewards
@@ -217,9 +216,9 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
             # store this observation
             memory.store_memory(states, actions, probs, vals, total_rewards, dones_received)
             
-            # if early_stop:
-            #     print("Early stopping")
-            #     break
+            if early_stop:
+                print("Early stopping")
+                break
 
             if num_steps % N == 0:
                 # anneal learning rate if specified
