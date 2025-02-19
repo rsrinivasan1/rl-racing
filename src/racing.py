@@ -6,6 +6,7 @@ import cv2
 import matplotlib.pyplot as plt
 import torch.nn as nn
 from tqdm import tqdm
+from collections import deque
 from memory import PPOMemory
 from network import Actor, Critic, SharedCNN
 from config import batch_size, learning_rate, n_epochs, gamma, gae_lambda, c_1, eps, N, n_games, n_envs
@@ -172,6 +173,9 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
         done = False
         scores = np.zeros(n_envs)
         lr = learning_rate
+
+        history_len =20
+        reward_history = [deque(maxlen=history_len) for _ in range(n_envs)]
         while not done:
             states = preprocess_states(states, frame_history)
             frame_history = states
@@ -180,27 +184,42 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
             total_rewards = np.zeros(n_envs)
             dones_received = np.zeros(n_envs, dtype=bool)
 
-            repeat_num = 10
+            repeat_num = 4
             for _ in range(repeat_num):
+                mask = ~dones_received
                 # repeat action
                 next_states, rewards, terminated, truncated, _ = envs.step(mapped_actions)
-                dones = terminated | truncated
+                dones_received = dones_received | terminated | truncated
 
-                mask = ~dones_received
                 total_rewards[mask] += rewards[mask]
 
-                # Track newly terminated environments
-                dones_received = dones_received | dones
-
-                reset_done_frames(frame_history, next_states, dones_received)
-                if (done := all(dones)):
+                reset_history_for_done_frames(frame_history, next_states, dones_received)
+                if done := all(dones_received):
                     break
             
-            print(f"Action: {actions[0]}, Reward: {total_rewards[0]}")
+            # print(f"Action: {actions[0]}, Reward: {total_rewards[0]}")
+
+            for j in range(n_envs):
+                reward_history[j].append(total_rewards[j])
+            
+            # # if any of the envs aren't getting rewards, stop all
+            # early_stop = False
+            # for i, env in enumerate(reward_history):
+            #     if len(env) == history_len and np.mean(env) < -0.09:
+            #         early_stop = True
+            #         # penalize the agent for not getting rewards
+            #         total_rewards[i] -= 10
+            #         break
+            
             num_steps += 1
-            scores += total_rewards / repeat_num
+            scores += total_rewards
+
             # store this observation
             memory.store_memory(states, actions, probs, vals, total_rewards, dones_received)
+            
+            # if early_stop:
+            #     print("Early stopping")
+            #     break
 
             if num_steps % N == 0:
                 # anneal learning rate if specified
@@ -242,7 +261,7 @@ def preprocess_state_single_env(state):
     return state
 
 
-def reset_done_frames(frame_history, next_states, dones):
+def reset_history_for_done_frames(frame_history, next_states, dones):
     for i, done in enumerate(dones):
         if done:
             frame_history[i] = preprocess_state_single_env(next_states[i])
