@@ -12,7 +12,7 @@ from tqdm import tqdm
 from collections import deque
 from memory import PPOMemory
 from network import Actor, Critic, SharedCNN
-from config import batch_size, learning_rate, n_epochs, gamma, gae_lambda, c_1, eps, N, n_games, n_envs
+from config import batch_size, learning_rate, n_epochs, gamma, gae_lambda, c_1, c_2, eps, N, n_games, n_envs
 
 
 def calculate_actor_loss(old_log_probs, log_probs, adv_batch):
@@ -148,8 +148,9 @@ def learn(actor, critic, optim, memory, lr):
                 returns = advantage[batch] + values[batch]
                 critic_loss = (returns - critic_value).pow(2).mean()
 
-                total_loss = actor_loss + c_1 * critic_loss
-
+                # entropy loss
+                entropy = distribution.entropy().mean()
+                total_loss = actor_loss + c_1 * critic_loss - c_2 * entropy
                 step(optim, total_loss)
 
     memory.clear_memory()
@@ -204,7 +205,10 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
                 reset_history_for_done_frames(frame_history, next_states, dones_received)
                 if done := all(dones_received):
                     break
-            total_rewards[mask] = np.clip(total_rewards[mask], -0.4, 0.9 * repeat_num)
+            # clip to avoid:
+            # 1. -100 reward on hitting border
+            # 2. incentivizing going too fast and hitting two tiles
+            total_rewards[mask] = np.clip(total_rewards[mask], -0.1 * repeat_num, 0.9 * repeat_num)
             # print(f"Action: {actions[0]}, Reward: {total_rewards[0]}")
             
             # # if any of the envs aren't getting rewards, stop all
