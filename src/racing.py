@@ -105,27 +105,20 @@ def learn(actor, critic, optim, memory, lr):
     optim.param_groups[0]['lr'] = lr
     
     for i in range(n_epochs):
+        # create batches from stored memory, shuffled each epoch
         states_arr, actions_arr, old_probs_arr, values_arr, rewards_arr, dones_arr, batches = memory.generate_batches(n_states=N)
-        # add 0 to each env in numpy array value_arr for last state
-        values_arr = np.concatenate([values_arr, np.zeros((n_envs, 1))], axis=1)
-
         for j in range(n_envs):
-            # Efficient GAE calculation
-            traj_length = len(rewards_arr[j])
-            advantages = np.zeros(traj_length)
-            next_advantage = 0
+            # calculate advantage for each env, for every state in memory
+            advantage = np.zeros_like(rewards_arr[j])
+            deltas = rewards_arr[j][:-1] + gamma * values_arr[j][1:] * (1 - dones_arr[j][:-1]) - values_arr[j][:-1]
             
-            # Ensure values_arr[j] has one more element than rewards_arr[j]
-            # Compute deltas
-            deltas = rewards_arr[j] + gamma * values_arr[j][1:traj_length+1] * (1 - dones_arr[j]) - values_arr[j][:traj_length]
+            # compute GAE in a vectorized O(n) manner
+            advantage[-1] = deltas[-1]  # last step advantage is just delta
+            for t in reversed(range(len(deltas) - 1)):
+                advantage[t] = deltas[t] + gamma * gae_lambda * (1 - dones_arr[j][t]) * advantage[t + 1]
             
-            # Backward pass to compute advantages
-            for t in reversed(range(traj_length)):
-                advantages[t] = deltas[t] + gamma * gae_lambda * (1 - dones_arr[j][t]) * next_advantage
-                next_advantage = advantages[t]
-            
-            advantage = torch.tensor(advantages).to(device)
-            values = torch.tensor(values_arr[j][:traj_length]).to(device)
+            advantage = torch.tensor(advantage).to(device)
+            values = torch.tensor(values_arr[j]).to(device)
 
             for batch in batches:
                 states = torch.tensor(states_arr[j][batch], dtype=torch.float).to(device)
@@ -200,7 +193,7 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
             
             # print(f"Action: {actions[0]}, Reward: {total_rewards[0]}")
             
-            # # if any of the envs aren't getting rewards, stop all
+            # if any of the envs aren't getting rewards, stop all
             early_stop = False
             for j, env in enumerate(reward_history):
                 reward_history[j].append(total_rewards[j])
@@ -268,7 +261,8 @@ def reset_history_for_done_frames(frame_history, next_states, dones):
 
 def make_env(gym_id):
     def thunk():
-        return gym.make(gym_id, render_mode="human")
+        return gym.make(gym_id)
+        # return gym.make(gym_id, render_mode='human')
     return thunk
 
 
