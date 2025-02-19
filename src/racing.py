@@ -1,4 +1,7 @@
 import gymnasium as gym
+from gymnasium.wrappers import RecordVideo
+import os
+import shutil
 import time
 import numpy as np
 import torch
@@ -67,11 +70,16 @@ def preprocess_states(states, frame_history):
     states = states[:, :-12, :, :]
     # Resize to 96x96
     states = np.array([cv2.resize(state, (96, 96)) for state in states])
+    
+    # Get pixels that are mostly red
+    red_mask = (states[..., 0] > 100) & (states[..., 1] < 60) & (states[..., 2] < 60)
+    states[red_mask] = 255
+
     # Convert to grayscale and add frame_width dimension at axis=1
-    states = np.expand_dims(np.dot(states[..., :3], [0.2989, 0.5870, 0.1140]), axis=1)  # Shape: [n_envs, 1, height, width]
+    states = np.expand_dims(np.dot(states[..., :3], [0.2989, 0.5870, 0.1140]), axis=1)  # Shape: [n_envs, 1, height, width]    
     # Turn gray track to black, everything else to white
-    states[states < 150] = 0
-    states[states >= 150] = 255
+    states[states < 150] = 0    
+    states[states > 180] = 255
 
     # If frame_history is None, initialize it with the current state repeated 4 times
     if frame_history is None:
@@ -82,7 +90,7 @@ def preprocess_states(states, frame_history):
         # remove second dimension from states
         frame_history[:, -1] = states.squeeze(axis=1)
 
-    # # Display all four frames
+    # Display all four frames
     # fig, axs = plt.subplots(1, 4, figsize=(12, 3))
     # for i in range(4):
     #     axs[i].imshow(frame_history[0, i], cmap='gray')
@@ -133,6 +141,10 @@ def learn(actor, critic, optim, memory, lr):
                 actor_loss = calculate_actor_loss(old_probs, new_probs, advantage[batch])
 
                 # total predicted reward of the state = advantage + value
+                # newvalue = critic_value
+                # b_returns = returns
+                # b_values = values[batch]
+                
                 returns = advantage[batch] + values[batch]
                 critic_loss = (returns - critic_value).pow(2).mean()
 
@@ -145,6 +157,7 @@ def learn(actor, critic, optim, memory, lr):
 
 def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
     best_score = -float('inf')
+    best_mean_score = -float('inf')
     prev_scores = []
     num_steps = 0
 
@@ -167,9 +180,11 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
         lr = learning_rate
 
         repeat_num = 4
-        history_len = 100 // 4
-        early_stopping_penalty = 30
+        history_len = 200 // repeat_num
+        early_stopping_penalty = 100
         reward_history = [deque(maxlen=history_len) for _ in range(n_envs)]
+
+        envs.envs[0].start_recording("current")
         while not done:
             states = preprocess_states(states, frame_history)
             frame_history = states
@@ -177,10 +192,9 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
 
             total_rewards = np.zeros(n_envs)
             dones_received = np.zeros(n_envs, dtype=bool)
-
+            mask = ~dones_received
             
             for _ in range(repeat_num):
-                mask = ~dones_received
                 # repeat action
                 next_states, rewards, terminated, truncated, _ = envs.step(mapped_actions)
                 dones_received = dones_received | terminated | truncated
@@ -190,18 +204,18 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
                 reset_history_for_done_frames(frame_history, next_states, dones_received)
                 if done := all(dones_received):
                     break
-            
+            total_rewards[mask] = np.clip(total_rewards[mask], -0.4, 0.9 * repeat_num)
             # print(f"Action: {actions[0]}, Reward: {total_rewards[0]}")
             
-            # if any of the envs aren't getting rewards, stop all
-            early_stop = False
-            for j, env in enumerate(reward_history):
-                reward_history[j].append(total_rewards[j])
-                if len(env) == history_len and np.mean(env) < -0.09 * repeat_num:
-                    early_stop = True
-                    # penalize the agent for not getting rewards
-                    total_rewards[j] -= early_stopping_penalty
-                    break
+            # # if any of the envs aren't getting rewards, stop all
+            # early_stop = False
+            # for j, env in enumerate(reward_history):
+            #     reward_history[j].append(total_rewards[j])
+            #     if len(env) == history_len and np.mean(env) < -0.09 * repeat_num:
+            #         early_stop = True
+            #         # penalize the agent for not getting rewards
+            #         total_rewards[j] -= early_stopping_penalty
+            #         break
             
             num_steps += 1
             scores += total_rewards
@@ -209,9 +223,9 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
             # store this observation
             memory.store_memory(states, actions, probs, vals, total_rewards, dones_received)
             
-            if early_stop:
-                print("Early stopping")
-                break
+            # if early_stop:
+            #     print("Early stopping")
+            #     break
 
             if num_steps % N == 0:
                 # anneal learning rate if specified
@@ -223,15 +237,23 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
                 learn(actor, critic, optim, memory, lr)
             states = next_states
         
+        if scores[0] > best_score:
+            best_score = scores[0]
+            # save recording
+            tqdm.write(f"Best score, saving recording")
+            shutil.rmtree("./videos")
+            os.makedirs("./videos")
+            envs.envs[0].stop_recording()  # Close the current recording
+            shutil.move("./videos/current.mp4", f"./videos/best_{int(best_score)}.mp4")
         # average score over all envs
         score = np.mean(scores)
         prev_scores.append(score)
         mean_score = np.mean(prev_scores[-100:])
 
-        print(f"\nEpisode {i}, lr: {round(lr, 5)}, score: {score}, mean score: {mean_score}")
-        if mean_score > best_score:
-            best_score = mean_score
-            print(f"Best average score over 100 trials: {best_score}\n")
+        tqdm.write(f"Episode {i}, lr: {round(lr, 5)}, score: {score}, mean score: {mean_score}")
+        if mean_score > best_mean_score:
+            best_mean_score = mean_score
+            tqdm.write(f"Best average score over 100 trials: {best_mean_score}")
 
     envs.close()
 
@@ -259,15 +281,17 @@ def reset_history_for_done_frames(frame_history, next_states, dones):
             frame_history[i] = preprocess_state_single_env(next_states[i])
 
 
-def make_env(gym_id):
+def make_env(gym_id, record_video=False, video_folder='./videos'):
     def thunk():
-        return gym.make(gym_id)
-        # return gym.make(gym_id, render_mode='human')
+        env = gym.make(gym_id, render_mode="rgb_array")
+        if record_video:
+            env = RecordVideo(env, video_folder=video_folder, episode_trigger=lambda x: False)
+        return env
     return thunk
 
 
 if __name__ == "__main__":
-    envs = gym.vector.SyncVectorEnv([make_env('CarRacing-v3') for _ in range(n_envs)])
+    envs = gym.vector.SyncVectorEnv([make_env('CarRacing-v3', record_video=(i == 0)) for i in range(n_envs)])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -284,3 +308,7 @@ if __name__ == "__main__":
     start = time.time()
     run(envs, actor, critic, optim, memory, device)
     print(f"Training took {(time.time() - start)} seconds")
+
+    # TODO: 
+    # Save recordings of the agent playing the game
+    # Build graph of rewards over time

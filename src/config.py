@@ -8,4 +8,4 @@ batch_size = 128
 N = 2000
 n_epochs = 10
 n_games = 2000
-n_envs = 1
+n_envs = 2
