@@ -157,7 +157,7 @@ def learn(actor, critic, optim, memory, lr):
     memory.clear_memory()
 
 
-def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
+def run(envs, actor, critic, optim, memory, device, checkpoint_file, anneal_lr=True):
     best_score = -float('inf')
     best_mean_score = -float('inf')
     prev_scores = []
@@ -170,6 +170,19 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
         3: [0, 0, 0.8],  # brake
         4: [0, 0, 0]  # do nothing
     }
+
+    if checkpoint_file:
+        checkpoint = torch.load(checkpoint_file, weights_only=False)
+        actor.load_state_dict(checkpoint['actor_state_dict'])
+        critic.load_state_dict(checkpoint['critic_state_dict'])
+        optim.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_episode = checkpoint['episode']
+        best_score = checkpoint['best_score']
+        best_mean_score = checkpoint['best_mean_score']
+        prev_scores = checkpoint['prev_scores']
+        print(f"Loaded checkpoint from {checkpoint_file}, starting from episode {start_episode}")
+    else:
+        start_episode = 0
 
     # initialize frame history for each env
     frame_history = None
@@ -184,7 +197,7 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
         writer.writerow(["Episode", "Mean Score"])
 
     # want to learn every N games
-    for i in tqdm(range(n_games), desc="Training episodes"):
+    for i in tqdm(range(start_episode, n_games), desc="Training episodes"):
         states = envs.reset()[0]
         done = False
         scores = np.zeros(n_envs)
@@ -325,7 +338,7 @@ def make_env(gym_id, record_video=False, video_folder='./videos'):
 
 if __name__ == "__main__":
     envs = gym.vector.SyncVectorEnv([make_env('CarRacing-v3', record_video=(i == 0)) for i in range(n_envs)])
-
+    checkpoint_file = input("Enter checkpoint file (leave empty for none): ")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     shared_cnn = SharedCNN().to(device)
@@ -339,7 +352,7 @@ if __name__ == "__main__":
     memory = PPOMemory(batch_size, n_envs)
 
     start = time.time()
-    run(envs, actor, critic, optim, memory, device)
+    run(envs, actor, critic, optim, memory, device, checkpoint_file)
     print(f"Training took {(time.time() - start)} seconds")
 
     # TODO: 
