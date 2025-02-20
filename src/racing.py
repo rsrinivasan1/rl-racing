@@ -2,6 +2,7 @@ import gymnasium as gym
 from gymnasium.wrappers import RecordVideo
 import os
 import shutil
+import csv
 import time
 import numpy as np
 import torch
@@ -172,13 +173,21 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
 
     # initialize frame history for each env
     frame_history = None
+    lr = learning_rate
+
+    os.makedirs("./checkpoints", exist_ok=True)
+    os.makedirs("./logs", exist_ok=True)
+
+    log_file = "./logs/mean_scores.csv"
+    with open(log_file, mode="w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["Episode", "Mean Score"])
 
     # want to learn every N games
     for i in tqdm(range(n_games), desc="Training episodes"):
         states = envs.reset()[0]
         done = False
         scores = np.zeros(n_envs)
-        lr = learning_rate
 
         repeat_num = 4
         history_len = 200 // repeat_num
@@ -205,6 +214,7 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
                 reset_history_for_done_frames(frame_history, next_states, dones_received)
                 if done := all(dones_received):
                     break
+
             # clip to avoid:
             # 1. -100 reward on hitting border
             # 2. incentivizing going too fast and hitting two tiles
@@ -249,15 +259,34 @@ def run(envs, actor, critic, optim, memory, device, anneal_lr=True):
             os.makedirs("./videos")
             envs.envs[0].stop_recording()  # Close the current recording
             shutil.move("./videos/current.mp4", f"./videos/best_{int(best_score)}.mp4")
+        
         # average score over all envs
         score = np.mean(scores)
         prev_scores.append(score)
         mean_score = np.mean(prev_scores[-100:])
+        
+        with open(log_file, mode="a", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow([i, mean_score])
 
         tqdm.write(f"Episode {i}, lr: {round(lr, 5)}, score: {score}, mean score: {mean_score}")
         if mean_score > best_mean_score:
             best_mean_score = mean_score
             tqdm.write(f"Best average score over 100 trials: {best_mean_score}")
+        
+        # Save model weights every 50 episodes
+        if (i + 1) % 50 == 0:
+            checkpoint_path = f"./checkpoints/checkpoint_episode_{i + 1}.pth"
+            torch.save({
+                'actor_state_dict': actor.state_dict(),
+                'critic_state_dict': critic.state_dict(),
+                'optimizer_state_dict': optim.state_dict(),
+                'episode': i + 1,
+                'best_score': best_score,
+                'best_mean_score': best_mean_score,
+                'prev_scores': prev_scores,
+            }, checkpoint_path)
+            tqdm.write(f"Saved checkpoint at episode {i + 1} to {checkpoint_path}")
 
     envs.close()
 
