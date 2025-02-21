@@ -22,6 +22,8 @@ Currently, I am experimenting with learning rate annealing, although I'm not sur
 
 ## Results
 
+Below are the very best runs performed by my model. My best iteration of the agent scored an average of 500 over 100 trials, and while this is very good, there is much to improve upon.
+
 ### Best run so far:
 
 https://github.com/user-attachments/assets/65d0535a-9e2d-46be-a916-2d0491016a6c
