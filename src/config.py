@@ -8,5 +8,5 @@ gae_lambda = 0.95
 batch_size = 128
 N = 2000
 n_epochs = 10
-n_games = 2000
+n_games = 4000
 n_envs = 1

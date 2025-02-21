@@ -157,7 +157,7 @@ def learn(actor, critic, optim, memory, lr):
     memory.clear_memory()
 
 
-def run(envs, actor, critic, optim, memory, device, checkpoint_file, anneal_lr=True):
+def run(envs, actor, critic, memory, device, checkpoint_file, record, anneal_lr=True):
     best_score = -float('inf')
     best_mean_score = -float('inf')
     prev_scores = []
@@ -175,7 +175,6 @@ def run(envs, actor, critic, optim, memory, device, checkpoint_file, anneal_lr=T
         checkpoint = torch.load(checkpoint_file, weights_only=False)
         actor.load_state_dict(checkpoint['actor_state_dict'])
         critic.load_state_dict(checkpoint['critic_state_dict'])
-        optim.load_state_dict(checkpoint['optimizer_state_dict'])
         start_episode = checkpoint['episode']
         best_score = checkpoint['best_score']
         best_mean_score = checkpoint['best_mean_score']
@@ -184,9 +183,17 @@ def run(envs, actor, critic, optim, memory, device, checkpoint_file, anneal_lr=T
     else:
         start_episode = 0
 
+    optim = optimizer = torch.optim.Adam(
+        set(actor.parameters()) | set(critic.parameters()), lr=learning_rate, eps=1e-5
+    )
+
     # initialize frame history for each env
     frame_history = None
     lr = learning_rate
+    if anneal_lr:
+        min_lr = 0.00001
+        frac = 1 - (start_episode / n_games)
+        lr = max(min_lr, learning_rate * frac)
 
     os.makedirs("./checkpoints", exist_ok=True)
     os.makedirs("./logs", exist_ok=True)
@@ -203,11 +210,15 @@ def run(envs, actor, critic, optim, memory, device, checkpoint_file, anneal_lr=T
         scores = np.zeros(n_envs)
 
         repeat_num = 4
-        history_len = 200 // repeat_num
-        early_stopping_penalty = 100
+        history_len = 12 // repeat_num  # number of actions taken before penalizing
+        ongrass_penalty = 1
+        ongrass_penalty_duration = [0 for _ in range(n_envs)]
+
         reward_history = [deque(maxlen=history_len) for _ in range(n_envs)]
 
-        envs.envs[0].start_recording("current")
+        if record:
+            envs.envs[0].start_recording("current")
+        
         while not done:
             states = preprocess_states(states, frame_history)
             frame_history = states
@@ -228,31 +239,28 @@ def run(envs, actor, critic, optim, memory, device, checkpoint_file, anneal_lr=T
                 if done := all(dones_received):
                     break
 
-            # clip to avoid:
-            # 1. -100 reward on hitting border
-            # 2. incentivizing going too fast and hitting two tiles
-            total_rewards[mask] = np.clip(total_rewards[mask], -0.1 * repeat_num, 0.9 * repeat_num)
+            # clip to avoid incentivizing going too fast and hitting two tiles
+            total_rewards[mask] = np.clip(total_rewards[mask], -100, 0.9 * repeat_num)
             # print(f"Action: {actions[0]}, Reward: {total_rewards[0]}")
             
-            # # if any of the envs aren't getting rewards, stop all
+            # if on grass for a long time, penalize the agent more
             # early_stop = False
-            # for j, env in enumerate(reward_history):
+            # for j, env_rewards in enumerate(reward_history):
             #     reward_history[j].append(total_rewards[j])
-            #     if len(env) == history_len and np.mean(env) < -0.09 * repeat_num:
+            #     if len(env_rewards) == history_len and np.mean(env_rewards) < -0.09 * repeat_num:
             #         early_stop = True
-            #         # penalize the agent for not getting rewards
-            #         total_rewards[j] -= early_stopping_penalty
-            #         break
+            #         ongrass_penalty_duration[j] += 1
+            #         if ongrass_penalty_duration[j] <= 10:
+            #             # print(f"Penalizing agent {j} for being on grass for too long")
+            #             total_rewards[j] -= ongrass_penalty
+            #     else:
+            #         ongrass_penalty_duration[j] = 0
             
             num_steps += 1
             scores += total_rewards
 
             # store this observation
             memory.store_memory(states, actions, probs, vals, total_rewards, dones_received)
-            
-            # if early_stop:
-            #     print("Early stopping")
-            #     break
 
             if num_steps % N == 0:
                 # anneal learning rate if specified
@@ -262,16 +270,18 @@ def run(envs, actor, critic, optim, memory, device, checkpoint_file, anneal_lr=T
                     lr = max(min_lr, learning_rate * frac)
                 # actually backpropagate
                 learn(actor, critic, optim, memory, lr)
+
             states = next_states
         
         if scores[0] > best_score:
             best_score = scores[0]
             # save recording
-            tqdm.write(f"Best score, saving recording")
-            shutil.rmtree("./videos")
-            os.makedirs("./videos")
-            envs.envs[0].stop_recording()  # Close the current recording
-            shutil.move("./videos/current.mp4", f"./videos/best_{int(best_score)}.mp4")
+            if record:
+                tqdm.write(f"Best score, saving recording")
+                shutil.rmtree("./videos")
+                os.makedirs("./videos")
+                envs.envs[0].stop_recording()  # Close the current recording
+                shutil.move("./videos/current.mp4", f"./videos/best_{int(best_score)}.mp4")
         
         # average score over all envs
         score = np.mean(scores)
@@ -293,7 +303,6 @@ def run(envs, actor, critic, optim, memory, device, checkpoint_file, anneal_lr=T
             torch.save({
                 'actor_state_dict': actor.state_dict(),
                 'critic_state_dict': critic.state_dict(),
-                'optimizer_state_dict': optim.state_dict(),
                 'episode': i + 1,
                 'best_score': best_score,
                 'best_mean_score': best_mean_score,
@@ -345,15 +354,11 @@ if __name__ == "__main__":
     actor = Actor(shared_cnn, device)
     critic = Critic(shared_cnn, device)
 
-    optim = optimizer = torch.optim.Adam(
-        set(actor.parameters()) | set(critic.parameters()), lr=learning_rate, eps=1e-5
-    )
-
     memory = PPOMemory(batch_size, n_envs)
 
     start = time.time()
-    run(envs, actor, critic, optim, memory, device, checkpoint_file)
-    print(f"Training took {(time.time() - start)} seconds")
+    run(envs, actor, critic, memory, device, checkpoint_file, True, anneal_lr=False)
+    print(f"Training took {(time.time() - start) // 60} min")
 
     # TODO: 
     # Save recordings of the agent playing the game
