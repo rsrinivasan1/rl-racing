@@ -1,6 +1,6 @@
 # RL with PPO on the CarRacing environment
 
-This project is an extension of my prior work on the Cartpole environment. My main goal here is to gain a better understanding of reward mechanisms in proximal policy optimization, and to discover the limits of my PPO implementation in PyTorch with limited hyperparameter tuning. This is still a work-in-progress (as of Feb 2025), and I hope to eventually "solve" this environment (achieving a mean score of 900 over 100 trials). This is a tough goal and will require some further work.
+This project is an extension of my prior work on the Cartpole environment. My main goal here is to gain a better understanding of reward mechanisms in proximal policy optimization (PPO), and to discover the limits of my PPO implementation in PyTorch with limited hyperparameter tuning. This is still a work-in-progress (as of Feb 2025), and I hope to eventually "solve" this environment (achieving a mean score of 900 over 100 trials). This is a tough goal and will require some further work.
 
 ## Method
 
