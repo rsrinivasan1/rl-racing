@@ -32,6 +32,10 @@ https://github.com/user-attachments/assets/65d0535a-9e2d-46be-a916-2d0491016a6c
 
 https://github.com/user-attachments/assets/dfb50112-20b8-45f0-8edf-640ce7143a05
 
+### Interesting behavior with a harsh on-grass penalty w/ immediate episode termination:
+
+https://github.com/user-attachments/assets/86a20dd3-be43-4305-9020-07ab6df690ef
+
 ## Next steps
 
 I'm looking forward to eventually cracking this environment, and obtaining a speedy and highly accurate model. I'd like to see how far I can get with my current standard PPO implementation, with some mild reward tuning, but I'm also open to the possibility of reducing the image input size, giving the model access to speed information, and even splitting the policy network into two (one for thrusting, one for steering, as done here: https://github.com/Ceudan/Car-Racing).
