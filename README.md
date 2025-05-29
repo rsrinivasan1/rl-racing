@@ -28,13 +28,15 @@ Below are the very best runs performed by my model. My best iteration of the age
 
 https://github.com/user-attachments/assets/65d0535a-9e2d-46be-a916-2d0491016a6c
 
-### A faulty but very speedy run (with grass penalty):
+### A faulty but very speedy run (with a penalty for inaction and being on grass):
 
 https://github.com/user-attachments/assets/dfb50112-20b8-45f0-8edf-640ce7143a05
 
 ### Interesting behavior with a harsh on-grass penalty w/ immediate episode termination:
 
 https://github.com/user-attachments/assets/86a20dd3-be43-4305-9020-07ab6df690ef
+
+I found this run to be fascinating as it reveals how the agent is extremely wary of being penalized when approaching sharp turns, yet still tries to go as fast as possible otherwise. 
 
 ## Next steps
 
