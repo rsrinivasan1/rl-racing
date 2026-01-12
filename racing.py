@@ -74,13 +74,13 @@ def preprocess_states(states, frame_history):
     
     # Get pixels that are mostly red
     red_mask = (states[..., 0] > 100) & (states[..., 1] < 60) & (states[..., 2] < 60)
-    states[red_mask] = 255
+    states[red_mask] = 0
 
     # Convert to grayscale and add frame_width dimension at axis=1
     states = np.expand_dims(np.dot(states[..., :3], [0.2989, 0.5870, 0.1140]), axis=1)  # Shape: [n_envs, 1, height, width]    
     # Turn gray track to black, everything else to white
     states[states < 150] = 0    
-    states[states > 180] = 255
+    states[states >= 150] = 255
 
     # If frame_history is None, initialize it with the current state repeated 4 times
     if frame_history is None:
@@ -108,56 +108,94 @@ def step(optim, loss):
     optim.step()
 
 
-# assumes you have N observations in memory, for each batch makes a step
 def learn(actor, critic, optim, memory, lr):
-    # update lr for both optimizers:
-    optim.param_groups[0]['lr'] = lr
-    
-    for i in range(n_epochs):
-        # create batches from stored memory, shuffled each epoch
-        states_arr, actions_arr, old_probs_arr, values_arr, rewards_arr, dones_arr, batches = memory.generate_batches(n_states=N)
-        for j in range(n_envs):
-            # calculate advantage for each env, for every state in memory
-            advantage = np.zeros_like(rewards_arr[j])
-            deltas = rewards_arr[j][:-1] + gamma * values_arr[j][1:] * (1 - dones_arr[j][:-1]) - values_arr[j][:-1]
-            
-            # compute GAE in a vectorized O(n) manner
-            advantage[-1] = deltas[-1]  # last step advantage is just delta
-            for t in reversed(range(len(deltas) - 1)):
-                advantage[t] = deltas[t] + gamma * gae_lambda * (1 - dones_arr[j][t]) * advantage[t + 1]
-            
-            advantage = torch.tensor(advantage).to(device)
-            values = torch.tensor(values_arr[j]).to(device)
+    # 1. Update learning rate
+    for param_group in optim.param_groups:
+        param_group['lr'] = lr
 
-            for batch in batches:
-                states = torch.tensor(states_arr[j][batch], dtype=torch.float).to(device)
-                old_probs = torch.tensor(old_probs_arr[j][batch], dtype=torch.float).to(device)
-                actions = torch.tensor(actions_arr[j][batch], dtype=torch.long).to(device)
+    # 2. Get data from memory
+    # Assumes these return numpy arrays of shape (n_envs, T, ...)
+    s_arr, a_arr, p_arr, v_arr, r_arr, d_arr, _ = memory.generate_batches(N)
 
-                distribution = actor(states)
-                critic_value = critic(states)
+    all_advantages = []
+    all_returns = []
 
-                new_probs = distribution.log_prob(actions)
-                
-                actor_loss = calculate_actor_loss(old_probs, new_probs, advantage[batch])
+    # 3. Calculate GAE and Returns BEFORE the epoch loop
+    # We do this per environment because sequences are contiguous there
+    for j in range(n_envs):
+        rewards = r_arr[j]
+        values = v_arr[j]
+        dones = d_arr[j]
+        
+        advantage = np.zeros(len(rewards), dtype=np.float32)
+        last_gae_lam = 0
+        
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_value = 0.0 if dones[t] else values[t]
+            else:
+                next_value = values[t + 1]
 
-                # total predicted reward of the state = advantage + value
-                # newvalue = critic_value
-                # b_returns = returns
-                # b_values = values[batch]
-                
-                returns = advantage[batch] + values[batch]
-                critic_loss = (returns - critic_value).pow(2).mean()
+            delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
+            advantage[t] = last_gae_lam = delta + gamma * gae_lambda * (1 - dones[t]) * last_gae_lam
+        
+        all_advantages.append(advantage)
+        all_returns.append(advantage + values)
 
-                # entropy loss
-                entropy = distribution.entropy().mean()
-                total_loss = actor_loss + c_1 * critic_loss - c_2 * entropy
-                step(optim, total_loss)
+    # 4. Flatten all data (Combine all environments into one big buffer)
+    # This is the "PPO way" - it treats all transitions as independent samples
+    t_states = torch.tensor(np.concatenate(s_arr), dtype=torch.float).to(device)
+    t_actions = torch.tensor(np.concatenate(a_arr), dtype=torch.long).to(device)
+    t_old_probs = torch.tensor(np.concatenate(p_arr), dtype=torch.float).to(device)
+    t_advantages = torch.tensor(np.concatenate(all_advantages), dtype=torch.float).to(device)
+    t_returns = torch.tensor(np.concatenate(all_returns), dtype=torch.float).to(device)
+
+    # 5. Normalize Advantages (Global normalization is more stable)
+    t_advantages = (t_advantages - t_advantages.mean()) / (t_advantages.std() + 1e-8)
+
+    # 6. The Learning Loop
+    dataset_size = t_states.size(0)
+    indices = np.arange(dataset_size)
+
+    for _ in range(n_epochs):
+        np.random.shuffle(indices)
+        
+        for start in range(0, dataset_size, batch_size):
+            end = start + batch_size
+            idx = indices[start:end]
+
+            # Mini-batch selection
+            states = t_states[idx]
+            actions = t_actions[idx]
+            old_log_probs = t_old_probs[idx]
+            advantages = t_advantages[idx]
+            returns = t_returns[idx]
+
+            # Forward pass
+            distribution = actor(states)
+            critic_values = critic(states).squeeze()
+            new_log_probs = distribution.log_prob(actions)
+            entropy = distribution.entropy().mean()
+
+            # Policy Loss (PPO Clip)
+            actor_loss = calculate_actor_loss(old_log_probs, new_log_probs, advantages)
+
+            # Value Loss (MSE between critic prediction and TD-lambda returns)
+            critic_loss = (returns - critic_values).pow(2).mean()
+
+            # Total Loss
+            total_loss = actor_loss + c_1 * critic_loss - c_2 * entropy
+
+            # Optimizer step
+            optim.zero_grad()
+            total_loss.backward()
+            # Optional: torch.nn.utils.clip_grad_norm_(list(actor.parameters()) + list(critic.parameters()), 0.5)
+            optim.step()
 
     memory.clear_memory()
 
 
-def run(envs, actor, critic, memory, device, checkpoint_file, record, anneal_lr=True):
+def run(envs, actor, critic, memory, checkpoint_file, record, anneal_lr=True):
     best_score = -float('inf')
     best_mean_score = -float('inf')
     prev_scores = []
@@ -183,7 +221,7 @@ def run(envs, actor, critic, memory, device, checkpoint_file, record, anneal_lr=
     else:
         start_episode = 0
 
-    optim = optimizer = torch.optim.Adam(
+    optim = torch.optim.Adam(
         set(actor.parameters()) | set(critic.parameters()), lr=learning_rate, eps=1e-5
     )
 
@@ -191,7 +229,7 @@ def run(envs, actor, critic, memory, device, checkpoint_file, record, anneal_lr=
     frame_history = None
     lr = learning_rate
     if anneal_lr:
-        min_lr = 0.00001
+        min_lr = 0.0001
         frac = 1 - (start_episode / n_games)
         lr = max(min_lr, learning_rate * frac)
 
@@ -210,11 +248,6 @@ def run(envs, actor, critic, memory, device, checkpoint_file, record, anneal_lr=
         scores = np.zeros(n_envs)
 
         repeat_num = 4
-        history_len = 12 // repeat_num  # number of actions taken before penalizing
-        ongrass_penalty = 1
-        ongrass_penalty_duration = [0 for _ in range(n_envs)]
-
-        reward_history = [deque(maxlen=history_len) for _ in range(n_envs)]
 
         if record:
             envs.envs[0].start_recording("current")
@@ -233,28 +266,12 @@ def run(envs, actor, critic, memory, device, checkpoint_file, record, anneal_lr=
                 next_states, rewards, terminated, truncated, _ = envs.step(mapped_actions)
                 dones_received = dones_received | terminated | truncated
 
-                total_rewards[mask] += rewards[mask]
+                # clip to avoid incentivizing going too fast and hitting two tiles
+                total_rewards[mask] += np.clip(rewards[mask], 0, 1)
 
                 reset_history_for_done_frames(frame_history, next_states, dones_received)
                 if done := all(dones_received):
                     break
-
-            # clip to avoid incentivizing going too fast and hitting two tiles
-            total_rewards[mask] = np.clip(total_rewards[mask], -100, 0.9 * repeat_num)
-            # print(f"Action: {actions[0]}, Reward: {total_rewards[0]}")
-            
-            # if on grass for a long time, penalize the agent more
-            # early_stop = False
-            # for j, env_rewards in enumerate(reward_history):
-            #     reward_history[j].append(total_rewards[j])
-            #     if len(env_rewards) == history_len and np.mean(env_rewards) < -0.09 * repeat_num:
-            #         early_stop = True
-            #         ongrass_penalty_duration[j] += 1
-            #         if ongrass_penalty_duration[j] <= 10:
-            #             # print(f"Penalizing agent {j} for being on grass for too long")
-            #             total_rewards[j] -= ongrass_penalty
-            #     else:
-            #         ongrass_penalty_duration[j] = 0
             
             num_steps += 1
             scores += total_rewards
@@ -345,6 +362,41 @@ def make_env(gym_id, record_video=False, video_folder='./videos'):
     return thunk
 
 
+def plot_rewards():
+    """Plot rewards over time from the training log."""
+    log_file = "./logs/mean_scores.csv"
+    if not os.path.exists(log_file):
+        print("No training log found. Run training first.")
+        return
+    
+    import pandas as pd
+    
+    # Read the CSV file
+    df = pd.read_csv(log_file)
+    
+    # Create the plot
+    plt.figure(figsize=(12, 6))
+    plt.plot(df['Episode'], df['Mean Score'], linewidth=2, alpha=0.8)
+    plt.title('Training Progress: Mean Score Over Episodes', fontsize=16)
+    plt.xlabel('Episode', fontsize=12)
+    plt.ylabel('Mean Score (100-episode average)', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    
+    # Add some statistics
+    max_score = df['Mean Score'].max()
+    max_episode = df.loc[df['Mean Score'].idxmax(), 'Episode']
+    plt.axhline(y=max_score, color='r', linestyle='--', alpha=0.7, label=f'Best: {max_score:.1f} (Episode {max_episode})')
+    
+    plt.legend()
+    plt.tight_layout()
+    
+    # Save the plot
+    os.makedirs("./plots", exist_ok=True)
+    plt.savefig('./plots/training_progress.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Plot saved to ./plots/training_progress.png")
+
+
 if __name__ == "__main__":
     envs = gym.vector.SyncVectorEnv([make_env('CarRacing-v3', record_video=(i == 0)) for i in range(n_envs)])
     checkpoint_file = input("Enter checkpoint file (leave empty for none): ")
@@ -357,9 +409,8 @@ if __name__ == "__main__":
     memory = PPOMemory(batch_size, n_envs)
 
     start = time.time()
-    run(envs, actor, critic, memory, device, checkpoint_file, True, anneal_lr=False)
+    run(envs, actor, critic, memory, checkpoint_file, True, anneal_lr=True)
     print(f"Training took {(time.time() - start) // 60} min")
 
-    # TODO: 
-    # Save recordings of the agent playing the game
     # Build graph of rewards over time
+    plot_rewards()
