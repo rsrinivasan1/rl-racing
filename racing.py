@@ -41,9 +41,10 @@ def choose_actions(states, actor, critic, action_map):
         values: A list of state values estimated by the critic for each environment.
     """
     states = torch.tensor(states, dtype=torch.float).to(device)
-    
-    distributions = actor(states)
-    values = critic(states)
+
+    with torch.no_grad():
+        distributions = actor(states)
+        values = critic(states)
 
     actions = distributions.sample()
     prob_actions = distributions.log_prob(actions)
@@ -72,15 +73,22 @@ def preprocess_states(states, frame_history):
     # Resize to 96x96
     states = np.array([cv2.resize(state, (96, 96)) for state in states])
     
-    # Get pixels that are mostly red
+    # Get pixels that are mostly red, mark them
     red_mask = (states[..., 0] > 100) & (states[..., 1] < 60) & (states[..., 2] < 60)
-    states[red_mask] = 0
+    states[red_mask] = 255
+
+    # Mark border as grass
+    states[states < 100] = 255
 
     # Convert to grayscale and add frame_width dimension at axis=1
     states = np.expand_dims(np.dot(states[..., :3], [0.2989, 0.5870, 0.1140]), axis=1)  # Shape: [n_envs, 1, height, width]    
-    # Turn gray track to black, everything else to white
-    states[states < 150] = 0    
-    states[states >= 150] = 255
+    # Turn gray track to white, everything else to black
+    track_mask = states < 150
+    states[track_mask] = 255
+    states[~track_mask] = 0
+
+    # Normalize
+    states = states / 255.0
 
     # If frame_history is None, initialize it with the current state repeated 4 times
     if frame_history is None:
@@ -108,14 +116,14 @@ def step(optim, loss):
     optim.step()
 
 
-def learn(actor, critic, optim, memory, lr):
+def learn(actor, critic, optim, memory, lr, next_value):
     # 1. Update learning rate
     for param_group in optim.param_groups:
         param_group['lr'] = lr
 
     # 2. Get data from memory
     # Assumes these return numpy arrays of shape (n_envs, T, ...)
-    s_arr, a_arr, p_arr, v_arr, r_arr, d_arr, _ = memory.generate_batches(N)
+    s_arr, a_arr, p_arr, v_arr, r_arr, d_arr = memory.generate_batches(N)
 
     all_advantages = []
     all_returns = []
@@ -131,13 +139,16 @@ def learn(actor, critic, optim, memory, lr):
         last_gae_lam = 0
         
         for t in reversed(range(len(rewards))):
+            next_non_terminal = 1.0 - dones[t]
+            # If t is the last step, we use the external 'next_value' passed to the function
             if t == len(rewards) - 1:
-                next_value = 0.0 if dones[t] else values[t]
+                # next_value is a tensor/array of shape (n_envs,), selecting j-th env
+                next_val = next_value[j]
             else:
-                next_value = values[t + 1]
+                next_val = values[t + 1]
 
-            delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
-            advantage[t] = last_gae_lam = delta + gamma * gae_lambda * (1 - dones[t]) * last_gae_lam
+            delta = rewards[t] + gamma * next_val * next_non_terminal - values[t]
+            advantage[t] = last_gae_lam = delta + gamma * gae_lambda * next_non_terminal * last_gae_lam
         
         all_advantages.append(advantage)
         all_returns.append(advantage + values)
@@ -189,7 +200,6 @@ def learn(actor, critic, optim, memory, lr):
             # Optimizer step
             optim.zero_grad()
             total_loss.backward()
-            # Optional: torch.nn.utils.clip_grad_norm_(list(actor.parameters()) + list(critic.parameters()), 0.5)
             optim.step()
 
     memory.clear_memory()
@@ -202,11 +212,11 @@ def run(envs, actor, critic, memory, checkpoint_file, record, anneal_lr=True):
     num_steps = 0
 
     action_map = {
-        0: [-1, 0, 0],  # turn left
-        1: [1, 0, 0],  # turn right
-        2: [0, 1, 0],  # accelerate
+        0: [-1, 0, 0],   # turn left
+        1: [1, 0, 0],    # turn right
+        2: [0, 1, 0],    # accelerate
         3: [0, 0, 0.8],  # brake
-        4: [0, 0, 0]  # do nothing
+        4: [0, 0, 0]     # do nothing
     }
 
     if checkpoint_file:
@@ -280,13 +290,19 @@ def run(envs, actor, critic, memory, checkpoint_file, record, anneal_lr=True):
             memory.store_memory(states, actions, probs, vals, total_rewards, dones_received)
 
             if num_steps % N == 0:
+                # Get next state values for GAE
+                next_states_processed = preprocess_states(next_states, frame_history.copy())
+                with torch.no_grad():
+                    next_values = critic(torch.tensor(next_states_processed, dtype=torch.float).to(device)).cpu().numpy()
+                
                 # anneal learning rate if specified
                 if anneal_lr:
                     min_lr = 0.00001
                     frac = 1 - (i / n_games)
                     lr = max(min_lr, learning_rate * frac)
-                # actually backpropagate
-                learn(actor, critic, optim, memory, lr)
+                
+                # actually backpropagate with next values
+                learn(actor, critic, optim, memory, lr, next_values)
 
             states = next_states
         
@@ -400,7 +416,7 @@ def plot_rewards():
 if __name__ == "__main__":
     envs = gym.vector.SyncVectorEnv([make_env('CarRacing-v3', record_video=(i == 0)) for i in range(n_envs)])
     checkpoint_file = input("Enter checkpoint file (leave empty for none): ")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
 
     shared_cnn = SharedCNN().to(device)
     actor = Actor(shared_cnn, device)

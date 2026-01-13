@@ -13,20 +13,12 @@ class PPOMemory:
         self.n_envs = n_envs
     
     def generate_batches(self, n_states):
-        # stores starting indices (0, batch_size, batch_size * 2, batch_size * 3, ...)
-        batch_start = np.arange(0, n_states, self.batch_size)
-        indices = np.arange(n_states, dtype=np.int64)
-        np.random.shuffle(indices)
-
-        batches = [indices[i: i + self.batch_size] for i in batch_start]
-
         return np.array(self.states), \
                 np.array(self.actions),\
                 np.array(self.probs), \
                 np.array(self.values), \
                 np.array(self.rewards), \
-                np.array(self.dones), \
-                batches
+                np.array(self.dones)
 
     def store_memory(self, states, actions, probs, vals, rewards, dones):
         for env_idx in range(len(states)):

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.distributions as dist
 
 def layer_init(layer, std=1.41, bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.xavier_uniform_(layer.weight, gain=std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
